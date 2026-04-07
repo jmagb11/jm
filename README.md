@@ -1,3 +1,2 @@
-#Crypto_Backtest_Portfolio
-
+# Crypto_Backtest_Portfolio
 Backtesting project of systematic trading strategies on cryptocurrencies using volatility-based signals and RSI indicators. Includes multi-asset data cleaning, feature engineering, and performance evaluation. Explores rule-based and machine learning approaches to assess risk, diversification, and robustness of trading strategies.
