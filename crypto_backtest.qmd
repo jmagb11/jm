@@ -1,0 +1,861 @@
+---
+title: "Dynamic portfolio backtesting project on crypto currencies"
+format: html
+editor: visual
+---
+
+A backtesting test on cryptocurrency returns is the subject of my work below. I tested a strategy based on indicators such as RSI and volatility.
+
+It was a very interesting project, and I asked myself a lot of questions to understand why my code didn't work in certain cases, or even why my strategy didn't work. I had to rework certain points several times and even abandon some of them.
+
+I tested simple strategies and ML based strategies.
+
+I justify my choice to test a strategy on the cryptocurrency market, which operates 24 hours a day. When we want to see how the market will behave after the weekend, we look at cryptocurrencies when the stock markets are closed.
+
+Furthermore, this market has no interruptions, compared to other markets where there can be large differences between the opening price and the previous day's closing price.
+
+I initially wondered why we were doing backtesting in the crypto sector, given that if we do backtesting, in any case, a crypto can have a sharp rise one year and completely fall off the next...
+
+Because backtesting is NOT used to predict which crypto will explode. It is used to answer much deeper questions. Is a systematic rule or an arbitrary choice? Does diversification reduce risk? (in this sector) Is a process better than pure intuition?
+
+Note : I found some inspiration from videos on Youtube, the course of Machine learning with R teach by Guillaume Coqueret at emlyon business school, his website, different resources in internet about the functionning of libraries, LLM tools when I my code was to complex and difficult to execute and some pages on LinkedIn.
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(zoo)
+library(highcharter)
+library(quantmod)
+library(TTR)
+library(rpart)
+library(rpart.plot)
+library(moments)
+```
+
+First, I'll show you how my data set is composed. I have about twenty cryptocurrencies that make up my data here, with about thirty metrics, some more important than others.
+
+```{r}
+load("crypto_backtest_data.RData")             
+data <- crypto_backtest_data
+head(data[[1]])
+```
+
+```{r}
+summary(data)
+```
+
+I removed panel_features_long and prices_adjclose, which I deemed unnecessary for my analysis.
+
+```{r}
+data <- data[ !names(data) %in% c("panel_features_long", "prices_adjclose") ]
+names(data) <- gsub("_features_long$", "", names(data))
+summary(data)
+```
+
+I looked at the periods for which I had data and noticed a large number of cryptocurrencies with a history dating back to 2018, so I decided to limit my analysis to these cryptocurrencies, more than ten, which gives me seven years of history and covers about two bull run cycles, as they are called.
+
+```{r}
+N <- 2555                       # I set the minimum number of days I want to keep.
+
+data <- data[sapply(data, function(df) is.data.frame(df) && nrow(df) >= N)]    # keep only cryptos with at least N rows.
+
+data <- lapply(data, function(df) { # Then I standardize the window for each crypto.
+  df$Date <- as.Date(df$Date)                            # make sure Date is a real Date type.
+  df <- df[order(df$Date), ]                                       # I sort by date so the order is clean.
+  tail(df, N)                                         # keep only the most recent N days.
+})
+
+resume_dates <- do.call(rbind, lapply(names(data), function(sym) {            # After that I build a quick summary table.
+  df <- data[[sym]]         # I pull the data for the current symbol.
+  data.frame(
+    symbol = sym,             # I store the symbol name.
+    n_days = nrow(df),                 # check how many days I ended up with.
+    start_date = min(df$Date),          # I take the first date in the kept window.
+    end_date = max(df$Date),              # take the last date in the kept window.
+    stringsAsFactors = FALSE                               # I avoid converting strings into factors.
+  )
+}))
+
+resume_dates                    # Finally I display the summary.
+```
+
+My crypto data set contains an RSI_14 column, which calculates the RSI over the last 14 days.
+
+For my strategy, I decided to use the RSI_14. I have a total of €100,000 to invest, and I buy when I am oversold and sell when I am overbought. I have set my oversold zone between 0 and 30 and my overbought zone between 80 and 100. Initially, it was 70-100, but I really want to sell at the extremes and not rush into anything.
+
+I then tried to calculate the average of my RSI overbought and oversold values per day, but I only got averages of 5 or 4. I wondered how it was possible to have only 5 consecutive days of overbought or oversold conditions when, if you look at the charts on Trading View, for example, overbought conditions last much longer on a 14-day RSI. But in fact, the chart is smoothed because it is continuous, which distorts the interpretation somewhat.
+
+An episode of overbought or oversold can last a long time, so the maximum doesn't tell me much because there may only be one in 50, for example. So I used the median. And I added the total scenario as well to see.
+
+```{r}
+LOW <- 30                                    # I set the oversold RSI threshold.
+HIGH <- 80                             # I set the overbought RSI threshold.
+RSI_COL <- "RSI_14"                                 # point to the column where the RSI values are stored.
+
+run_lengths <- function(cond) {                     # create a helper to measure consecutive TRUE streaks.
+  r <- rle(cond)                              # I compress the logical vector into runs.
+  r$lengths[r$values]                    # I return only the lengths of the TRUE runs.
+}
+
+tab_rsi <- do.call(rbind, lapply(names(data), function(sym) {     # Then I compute the stats for each crypto and stack everything together.
+  df <- data[[sym]]                                            # pull the data for the current symbol.
+  rsi <- as.numeric(df[[RSI_COL]])                            # extract the RSI column as numeric to avoid type issues.
+
+  tot_oversold <- sum(rsi < LOW, na.rm = TRUE)                          # I count how many days RSI is below LOW.
+  tot_overbought <- sum(rsi > HIGH, na.rm = TRUE)               # I count how many days RSI is above HIGH.
+  tot_extremes <- sum((rsi < LOW) | (rsi > HIGH), na.rm = TRUE)         # count days in either extreme zone.
+
+  os_runs <- run_lengths(rsi < LOW)                              # measure oversold streak lengths.
+  ob_runs <- run_lengths(rsi > HIGH)                                       # I measure overbought streak lengths.
+
+  data.frame(
+    symbol = sym,                                         # I keep the symbol as an identifier.
+
+    total_days_oversold = tot_oversold,                        # I store total oversold days.
+    total_days_overbought = tot_overbought,                             # store total overbought days.
+    total_days_extremes = tot_extremes,                                    # store total extreme days.
+
+    mean_episode_days_oversold = ifelse(length(os_runs)==0, 0, mean(os_runs)),          # I compute average oversold streak length (0 if none).
+    median_episode_days_oversold = ifelse(length(os_runs)==0, 0, median(os_runs)),      # compute median oversold streak length.
+    max_episode_days_oversold = ifelse(length(os_runs)==0, 0, max(os_runs)),                 # I take the longest oversold streak.
+
+    mean_episode_days_overbought = ifelse(length(ob_runs)==0, 0, mean(ob_runs)),         # compute average overbought streak length (0 if none).
+    median_episode_days_overbought = ifelse(length(ob_runs)==0, 0, median(ob_runs)),     # compute median overbought streak length.
+    max_episode_days_overbought = ifelse(length(ob_runs)==0, 0, max(ob_runs)),      # I take the longest overbought streak.
+
+    stringsAsFactors = FALSE                         # I keep strings as strings.
+  )
+}))
+
+tab_rsi                                                  # Finally I display the resulting table.
+```
+
+With regard to volatility, I used a Vol_30 column, which calculates the average volatility over the last 30 days.
+
+```{r}
+WINDOW <- 30                                              # I set the rolling window size (in days) for volatility.
+
+run_lengths <- function(x) rle(x)$lengths[rle(x)$values]     # I use a small helper to get consecutive TRUE streak lengths.
+
+tab_vol <- do.call(rbind, lapply(names(data), function(sym) {                          # Then I compute the same volatility stats for each crypto and bind rows.
+  df <- data[[sym]]                                      # grab the dataset for the current symbol.
+
+  ret <- diff(log(df$Adj.Close))                           # I compute log returns from adjusted close prices.
+
+  vol <- sapply(seq_along(ret), function(i)                       # calculate rolling volatility (std dev of returns).
+    if (i < WINDOW) NA else sd(ret[(i-WINDOW+1):i], na.rm = TRUE)
+  )
+  vol <- vol[!is.na(vol)]                                    # I drop the initial NA values where the window is incomplete.
+
+  low <- quantile(vol, 0.30)                            # I set a “low vol” threshold using the 30th percentile.
+  high <- quantile(vol, 0.70)                                  # set a “high vol” threshold using the 70th percentile.
+
+  data.frame(
+    symbol = sym,                                         # keep the symbol as the identifier.
+
+    vol_mean = mean(vol),                           # I store the average rolling volatility.
+    vol_max = max(vol),                                               # store the maximum rolling volatility observed.
+
+    total_days_low_vol = sum(vol < low),                                 # I count how many days fall into low volatility.
+    total_days_high_vol = sum(vol > high),                    # I count how many days fall into high volatility.
+
+    mean_days_low_vol = mean(run_lengths(vol < low)),                # compute average length of low-vol streaks.
+    median_days_low_vol = median(run_lengths(vol < low)),                # compute median length of low-vol streaks.
+    max_days_low_vol = max(run_lengths(vol < low)),                              # I grab the longest low-vol streak.
+
+    mean_days_high_vol = mean(run_lengths(vol > high)),              # I compute average length of high-vol streaks.
+    median_days_high_vol = median(run_lengths(vol > high)),             # compute median length of high-vol streaks.
+    max_days_high_vol = max(run_lengths(vol > high)),                           # grab the longest high-vol streak.
+
+    stringsAsFactors = FALSE                                   # I prevent strings from being converted into factors.
+  )
+}))
+
+tab_vol                                                        # Finally I display the volatility summary table.
+```
+
+Looking at the results I obtained, maximum volatility for a month of up to more than 30% seems entirely consistent with the crypto universe. And an average of up to 7% per month as well.
+
+I then allocate funds based on the inverse volatility of my crypto portfolio. In other words, the more volatile the asset, the lower its weighting in the portfolio.
+
+```{r}
+vol_mean <- sapply(data, function(df) {                    # I compute the average 30-day volatility for each crypto.
+  mean(df$Vol_30, na.rm = TRUE)
+})
+
+raw_w <- 1 / vol_mean                                   # invert volatility so lower-vol assets get higher weights.
+alloc_pct <- 100 * raw_w / sum(raw_w)            # Then I normalize the weights to express them in percentages.
+
+alloc_table <- data.frame(
+  symbol = names(vol_mean),                         # store the crypto symbols.
+  vol_mean = as.numeric(vol_mean),                                # I keep the average volatility values.
+  allocation_pct = as.numeric(alloc_pct),            # store the corresponding allocation percentages.
+  stringsAsFactors = FALSE
+)
+
+alloc_table <- alloc_table[order(-alloc_table$allocation_pct), ]        # sort the table by allocation weight (descending).
+alloc_table                                            # Finally I display the allocation table.
+```
+
+Unsurprisingly, Bitcoin has the highest allocation, followed by Ethereum, with the rest of the altcoins allocated from most volatile to least volatile. Memecoin DOGE is not the most volatile, which is quite a big surprise.
+
+```{r}
+INIT<-1e5; LOW<-30; HIGH<-80; TCOST<-0.001                           # I set the main parameters (capital, RSI thresholds, costs).
+
+w<-setNames(alloc_table$allocation_pct/100, alloc_table$symbol)
+data_bt<-data[names(data)%in%names(w)] ; w<-w[names(data_bt)] ; w<-w/sum(w)
+syms<-names(data_bt)
+dates<-sort(Reduce(intersect,lapply(data_bt,\(d) as.Date(d$Date))))      # I align all assets on the same common calendar.
+
+P<-S<-matrix(NA_real_,length(dates),length(syms),dimnames=list(as.character(dates),syms))
+for(j in seq_along(syms)){ d<-data_bt[[syms[j]]]; d$Date<-as.Date(d$Date); m<-match(dates,d$Date)
+  P[,j]<-d$Adj.Close[m] ; S[,j]<-d$RSI_14[m]
+}
+
+bt <- function(tr){                                # I run the backtest with tranche size tr.
+  tgt<-INIT*w ; step<-tr*tgt ; cash<-INIT
+  u<-rep(0,length(syms)) ; eq<-numeric(length(dates)) ; cost<-0
+
+  for(t in seq_along(dates)){
+    p<-P[t,] ; r<-S[t,] ; pos<-u*p
+
+    for(j in which(!is.na(r)&r>HIGH&u>0&!is.na(p))){                              # sell on overbought signals.
+      amt<-min(step[j],pos[j]) ; su<-amt/p[j] ; c<-amt*TCOST
+      u[j]<-u[j]-su ; cash<-cash+(amt-c) ; cost<-cost+c
+    }
+
+    pos<-u*p
+    for(j in which(!is.na(r)&r<LOW&!is.na(p))){                           # I buy on oversold signals up to target.
+      gap<-tgt[j]-pos[j] ; if(gap<=0||cash<=0) next
+      amt<-min(step[j],gap,cash) ; c<-amt*TCOST
+      u[j]<-u[j]+(amt-c)/p[j] ; cash<-cash-amt ; cost<-cost+c
+    }
+
+    eq[t]<-cash+sum(u*p,na.rm=TRUE)
+  }
+
+  re<-diff(log(eq))
+  yrs<-as.numeric(difftime(tail(dates,1),head(dates,1),units="days"))/365.25
+  cagr<-(tail(eq,1)/INIT)^(1/yrs)-1
+  dd<-eq/cummax(eq)-1 ; mdd<-min(dd,na.rm=TRUE)
+  sh<-if(is.na(sd(re,na.rm=TRUE))||sd(re,na.rm=TRUE)==0) NA else mean(re,na.rm=TRUE)/sd(re,na.rm=TRUE)*sqrt(365.25)
+  cal<-if(mdd==0) NA else cagr/abs(mdd)
+
+  list(
+    eq=data.frame(Date=dates, Equity=eq),
+    stats=c(tranche=tr, final=tail(eq,1), cagr=cagr, sharpe=sh, max_dd=mdd, calmar=cal, trade_cost=cost)
+  )
+}
+
+
+```
+
+I don't keep a percentage in cash because we can see that It is spent gradually in the back test.
+
+```{r}
+dsr <- function(r, n_trials = 1) {
+  r <- r[is.finite(r)]                 # I clean the returns by removing NA and infinite values.
+  if (length(r) < 30) return(NA)                  # I require a minimum number of observations.
+
+  sr <- mean(r) / sd(r)                         # compute the standard Sharpe ratio.
+  if (!is.finite(sr)) return(NA)                # I stop if the Sharpe is not well-defined.
+
+  s <- skewness(r); k <- kurtosis(r)                     # compute skewness and kurtosis of returns.
+  Tn <- length(r)                                 # I store the sample size.
+
+  se <- sqrt((1 - s*sr + ((k-1)/4)*sr^2) / (Tn - 1))               # I estimate the standard error of the Sharpe ratio.
+  sr_star <- qnorm(1 - 1/n_trials) * se          # compute the luck-adjusted Sharpe threshold.
+
+  pnorm((sr*(1 + s*sr/6 - (k-3)*sr^2/24) - sr_star) / se)     # I return the Deflated Sharpe Ratio.
+}
+```
+
+I created my function to calculate ma deflated sharpe ratio to ensure about the truthfulness of my sharpe ratio. I then tested my strategy and plotted the result.
+
+```{r}
+best_tranche <- 0.03
+strat <- bt(best_tranche)
+
+plot_equity <- function(df, title = "Equity curve"){
+  ggplot(df, aes(x = Date, y = Equity)) +
+    geom_line(color = "#1f77b4", linewidth = 0.6) +
+    labs(title = title, x = "Date", y = "Equity") +
+    theme_minimal(base_size = 13) +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+
+plot_equity(strat$eq, "Equity curve of the strategy")
+
+```
+
+We can see in this plot that my strategie follow well the market, as we can see two phases of bull market.But we have also a lot of variation in the portfolio value. The bull market in 2020-2021 and the bear one until 2024.
+
+I then looked for the segment most likely to generate returns while limiting risk.
+
+```{r}
+TR <- c(.02,.03,.04,.05,.10,.15,.20)
+
+bench <- do.call(rbind, lapply(TR, \(x) {
+  s <- bt(x)$stats
+  data.frame(tranche = x, t(s))
+}))
+
+bench$calmar <- as.numeric(bench$calmar)
+bench <- bench[order(-bench$calmar), ]
+
+bench
+```
+
+The 0.03 tranche seems optimal for our strategy hereas the final value of the portfolio is the largest. The Sharpe ratio is acceptable, the maximum drawdown is very high, but the Calmar indicates a favorable risk-adjusted performance.
+
+```{r}
+prices_portfolio <- strat$eq |>
+  transmute(Date, value = Equity)
+
+highchart(type = "stock") %>%
+  hc_title(text = "Evolution of the Portfolio") %>%
+  hc_add_series(
+    prices_portfolio,
+    type = "line",
+    hcaes(x = Date, y = value),
+    name = "Portfolio"
+  ) %>%
+  hc_tooltip(pointFormat = "{point.y:.3f}")
+```
+
+The value of the portfolio peaked at €3.7 million.
+
+I then studied the distribution of returns.
+
+```{r}
+returns_pf <- strat$eq |>
+  mutate(ret = Equity / lag(Equity) - 1) |>
+  na.omit()
+
+m <- mean(returns_pf$ret)
+s <- sd(returns_pf$ret)
+
+ggplot(returns_pf, aes(x = ret)) +
+  geom_histogram(aes(y = ..density..), bins = 100, alpha = 0.5, fill = "#1f77b4") +
+  stat_function(fun = dnorm, args = list(mean = m, sd = s),
+                color = "red", linewidth = 1) +
+  labs(
+    title = "Distribution of portfolio returns",
+    x = "Daily return",
+    y = "Density"
+  ) +
+  theme_light()
+```
+
+We have a distribution of returns centered around 0, which is normal, but it is not symmetrical, indicating the presence of skewness. We can see that the negative side is more pronounced, meaning that extreme losses are more likely than extreme gains.
+
+```{r}
+dens2 <- function(x)
+  dnorm(x, mean = m, sd = s) /
+  mean(returns_pf$ret < -0.02 & returns_pf$ret > -0.12, na.rm = TRUE)
+
+ggplot(returns_pf, aes(x = ret)) +
+  geom_histogram(aes(y = ..density..), bins = 100, alpha = 0.6) +
+  stat_function(fun = dens2, color = "red") +
+  xlim(-0.12, -0.02) +
+  theme_light()
+
+```
+
+Next, we see high kurtosis here, with thicker tails compared to a normal distribution. This shows that extreme returns occur more often than expected, which increases the overall risk of the strategy. We are going to use measures such as the Deflated Sharpe Ratio that take these characteristics into account.
+
+```{r}
+nb_days <- 30
+vol <- numeric(nrow(returns_pf) - nb_days + 1)
+
+for(i in 1:length(vol)){
+  vol[i] <- sd(returns_pf$ret[i:(i + nb_days - 1)])
+}
+
+vol <- data.frame(
+  Date = returns_pf$Date[nb_days:nrow(returns_pf)],
+  vol = vol * sqrt(365)
+)
+
+highchart(type = "stock") %>%
+  hc_title(text = "Evolution of realized volatility (Portfolio)") %>%
+  hc_add_series(
+    vol,
+    type = "line",
+    hcaes(x = Date, y = vol),
+    name = "Realized volatility"
+  ) %>%
+  hc_tooltip(pointFormat = "{point.y:.2f}")
+```
+
+We observe that the realized volatility of the portfolio varies significantly over time, with marked peaks during periods of market stress (2020–2021), followed by a calmer phase, which shows that the portfolio's risk is regime-dependent and not constant.
+
+```{r}
+best_tranche <- 0.03
+strat <- bt(best_tranche)
+dsr_2018_2024 <- dsr(diff(log(strat$eq$Equity)), n_trials = 11)
+c(strat$stats, deflated_sharpe = dsr_2018_2024)
+
+btc_sym <- colnames(P)[grepl("^BTC", colnames(P))]
+stopifnot(length(btc_sym) == 1)
+
+u_btc  <- INIT / P[1, btc_sym]                      # BTC bought at the beginning
+eq_btc <- as.numeric(P[, btc_sym] * u_btc)                  # equity curve BTC
+
+eq_all <- data.frame(
+  Date = as.Date(dates),
+  Strategy = strat$eq$Equity,
+  BH_BTC = eq_btc
+)
+```
+
+The deflated Sharpe ratio indicates that we should interpret these results with caution, as there is a 40% chance that the Sharpe result is due to chance.
+
+We plot this Strategy against the Bitcoin.
+
+```{r}
+eq_long <- pivot_longer(eq_all, -Date, names_to = "Portfolio", values_to = "Equity")
+
+ggplot(eq_long, aes(x = Date, y = Equity, color = Portfolio)) +
+  geom_line(linewidth = 0.6) +
+  scale_color_manual(values = c("Strategy" = "#1f77b4", "BH_BTC" = "#ff7f0e")) +
+  labs(
+    title = "Equity curves comparison",
+    x = "Date",
+    y = "Equity (€)",
+    color = ""
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    legend.key.width = unit(2, "cm"),
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+I then compared the returns that BTC would have generated with the returns generated by my strategy. It turns out that my strategy significantly outperforms BTC.
+
+I then tested my strategy on two different benchmarks, which turned out to be quite similar. We have two benchmarks here, one weighted according to inverse volatility allocation and one also weighted between cryptocurrencies.
+
+```{r}
+best_tranche <- 0.03                 # I select the tranche size that performed best in-sample.
+
+w_use <- w[colnames(P)]                           # align the portfolio weights with the assets used in the price matrix.
+w_use <- w_use / sum(w_use)                  # I re-normalize the weights to ensure they sum to one.
+
+u_w  <- (INIT * w_use) / P[1,]                    # convert initial capital into units for the weighted buy-and-hold portfolio.
+eq_w <- as.numeric(P %*% u_w)             # I compute the equity curve of the weighted benchmark over time.
+
+u_eq <- (INIT / ncol(P)) / P[1,]                  # build an equal-weight buy-and-hold portfolio in units.
+eq_eq <- as.numeric(P %*% u_eq)               # I compute the equity curve of the equal-weight benchmark.
+
+eq_all <- data.frame(
+  Date = as.Date(dates),                   # I store the common dates.
+  Strategy = strat$eq$Equity,                     # store the equity curve of the active strategy.
+  BH_weighted = eq_w,                   # store the weighted buy-and-hold benchmark.
+  BH_equal = eq_eq                                # store the equal-weight buy-and-hold benchmark.
+)
+
+```
+
+```{r}
+eq_long <- pivot_longer(eq_all, -Date, names_to="Portfolio", values_to="Equity")
+
+ggplot(eq_long, aes(Date, Equity, color = Portfolio)) +
+  geom_line(linewidth = 0.3) +
+  scale_color_manual(values = c(
+    "Strategy"    = "#1f77b4",
+    "BH_weighted" = "#ff7f0e",
+    "BH_equal"    = "#2ca02c"
+  )) +
+  labs(title = "Equity curves comparison", x = "Date", y = "Equity (€)", color = "") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5))
+
+metric <- function(x){
+  yrs <- as.numeric(difftime(tail(eq_all$Date,1), head(eq_all$Date,1), "days"))/365.25
+  c(
+    Final  = tail(x,1),
+    CAGR   = (tail(x,1)/x[1])^(1/yrs)-1,
+    MaxDD  = min(x/cummax(x)-1)
+  )
+}
+
+tab <- rbind(
+  Strategy    = c(metric(eq_all$Strategy),    trade_cost = as.numeric(strat$stats["trade_cost"])),
+  BH_weighted = c(metric(eq_all$BH_weighted), trade_cost = 0),
+  BH_equal    = c(metric(eq_all$BH_equal),    trade_cost = 0)
+)
+
+kable(round(tab, 4), caption = "Performance metrics summary")
+```
+
+We can see that my strategy outperforms the other two benchmarks throughout the entire period, there is not a single apparent moment when the benchmarks appear to be better.
+
+I tried representing them by comparing them to each other on a graph to see the differences, but still nothing.
+
+```{r}
+ggplot(
+  pivot_longer(eq_all[, c("Date", "BH_weighted", "BH_equal")],
+               -Date, names_to = "Benchmark", values_to = "Equity"),
+  aes(Date, Equity, color = Benchmark)
+) +
+  geom_line(linewidth = 0.6) +
+  labs(x = "Date", y = "Equity (€)", color = "") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+tranche <- 0.03
+strat <- bt(tranche)
+
+u_w  <- (INIT * w) / P[1, ];  eq_w  <- as.numeric(P %*% u_w)
+u_eq <- (INIT / ncol(P)) / P[1, ]; eq_eq <- as.numeric(P %*% u_eq)
+
+eq_all <- data.frame(Date = as.Date(dates),
+                     Strategy = strat$eq$Equity,
+                     BH_weighted = eq_w,
+                     BH_equal = eq_eq)
+
+metrics <- function(x, d, tc=0, ann=365){
+  r <- diff(log(x)); yrs <- as.numeric(difftime(tail(d,1), head(d,1), "days"))/365.25
+  dd <- x/cummax(x)-1; mdd <- min(dd, na.rm=TRUE)
+  c(final=tail(x,1),
+    cagr=(tail(x,1)/x[1])^(1/yrs)-1,
+    sharpe=if(sd(r,na.rm=TRUE)>0) mean(r,na.rm=TRUE)/sd(r,na.rm=TRUE)*sqrt(ann) else NA,
+    max_dd=mdd,
+    calmar=if(!is.na(mdd) && mdd<0) ((tail(x,1)/x[1])^(1/yrs)-1)/abs(mdd) else NA,
+    trade_cost=tc)
+}
+
+tab <- do.call(rbind, lapply(names(eq_all)[-1], \(nm)
+  c(tranche = if(nm=="Strategy") tranche else NA,
+    metrics(eq_all[[nm]], eq_all$Date, tc = if(nm=="Strategy") as.numeric(strat$stats["trade_cost"]) else 0))
+))
+
+tab <- as.data.frame(round(tab, 6))
+tab
+
+```
+
+My strategy significantly outperforms the other two benchmarks, on all points.
+
+```{r}
+dsr_strat <- dsr(diff(log(strat$eq$Equity)), n_trials = 11)
+dsr_bhw   <- dsr(diff(log(eq_w)), n_trials = 11)
+dsr_bhe   <- dsr(diff(log(eq_eq)), n_trials = 11)
+
+data.frame(
+  Portfolio = c("Strategy", "BH_weighted", "BH_equal"),
+  Deflated_Sharpe = c(dsr_strat, dsr_bhw, dsr_bhe)
+)
+
+```
+
+The deflated Sharpe ratio of my strategy is higher than that of the benchmarks. The benchmarks shows not really credible results as they have 60% chance to come from hazard.
+
+Now I'm going to test my strategy on the 2025 period to see if it works or not.
+
+#I download all the data for 2025 (RSI_14, Vol_30, etc...)
+
+```{r}
+start_date <- as.Date("2024-12-01")
+end_date   <- as.Date("2025-12-31")
+
+# symbols from alloc_table
+syms <- unique(alloc_table$symbol)
+
+# clean symbols for Yahoo
+to_yahoo <- function(x){
+  x <- gsub("_USD|-USD", "", x)
+  paste0(x, "-USD")
+}
+
+tickers <- setNames(vapply(syms, to_yahoo, character(1)), syms)
+
+# download + indicators
+data_2025 <- lapply(names(tickers), function(sym){
+
+  x <- suppressWarnings(
+    getSymbols(tickers[[sym]],
+               src = "yahoo",
+               from = start_date,
+               to   = end_date,
+               auto.assign = FALSE)
+  )
+
+  df <- data.frame(
+    Date = as.Date(index(x)),
+    Adj.Close = as.numeric(Ad(x))
+  ) |>
+    arrange(Date) |>
+    mutate(
+      ret = Adj.Close / lag(Adj.Close) - 1,
+      RSI_14 = RSI(Adj.Close, n = 14),
+      Vol_30 = rollapply(ret, 30, sd, align = "right", fill = NA) * sqrt(365.25)
+    ) |>
+    select(Date, Adj.Close, RSI_14, Vol_30)
+
+  df
+})
+
+names(data_2025) <- names(tickers)
+
+```
+
+```{r}
+head(data_2025[[1]], 10)
+```
+
+We can notice here when we go through the data, that the RSI_14 stayed a lot in the neutral zone (between 30 and 80) and we also notice a very high volatility.
+
+```{r}
+inv_vol_alloc_2025 <- function(data_list, vol = "Vol_30", from = as.Date("2025-01-01")){
+  v <- sapply(data_list, \(x){
+    idx <- as.Date(x$Date) >= from
+    mean(x[[vol]][idx], na.rm = TRUE)
+  })
+  w <- (1 / v); w <- w / sum(w)
+
+  data.frame(symbol = names(w), vol_mean = v, allocation_pct = 100*w) |>
+    arrange(desc(allocation_pct))
+}
+
+alloc_table_2025 <- inv_vol_alloc_2025(data_2025)
+alloc_table_2025
+
+```
+
+Here, I have done the same as before, I wanted to construct an allocation that is inversely proportional to volatility. The idea was to reduce the overall risk of the portfolio by giving more weight to assets that can be described as more stable. Tron seems to be the less volatile one during this time frame, so it got the higher allocation.
+
+We test this allocation with the strategy on 2025 :
+
+```{r}
+w <- setNames(alloc_table_2025$allocation_pct/100, alloc_table_2025$symbol)
+data_bt <- data_2025[names(data_2025) %in% names(w)]
+w <- w[names(data_bt)]; w <- w/sum(w)
+syms <- names(data_bt)
+
+dates <- sort(Reduce(intersect, lapply(data_bt, \(d) as.Date(d$Date))))
+P <- S <- matrix(NA_real_, length(dates), length(syms))
+for(j in seq_along(syms)){
+  d <- data_bt[[j]]
+  m <- match(dates, as.Date(d$Date))
+  P[,j] <- d$Adj.Close[m]
+  S[,j] <- d$RSI_14[m]
+}
+
+k <- dates >= as.Date("2025-01-01")
+dates <- dates[k]
+P <- P[k, , drop = FALSE]
+S <- S[k, , drop = FALSE]
+
+tranche_2025 <- 0.05
+strat_2025 <- bt(tranche_2025)
+
+strat_2025$stats
+```
+
+With a 5% tranche, the strategy in 2025 shows a slightly positive final performance of around €102k for €100k at the outset, demonstrating that it remains profitable despite a more challenging market. The CAGR is low at around 2.2% and the Sharpe ratio is low, with gains being limited and irregular. On the other hand, the maximum drawdown is very low at around −7.8% compared to previous periods, showing that this choice of tranche is primarily aimed at controlling risk rather than seeking high performance.
+
+```{r}
+p <- ggplot(strat_2025$eq, aes(Date, Equity)) +
+  geom_line(linewidth=.6) + theme_minimal(base_size=13) +
+  labs(title="RSI Strategy (2025)", y="Equity", x="")
+
+p
+
+u_w  <- (INIT*w)/P[1,]; eq_w  <- as.numeric(P %*% u_w)
+u_eq <- (INIT/length(syms))/P[1,]; eq_eq <- as.numeric(P %*% u_eq)
+
+eq_all <- data.frame(Date=dates, Strategy=strat_2025$eq$Equity, BH_weighted=eq_w, BH_equal=eq_eq) |>
+  pivot_longer(-Date, names_to="Portfolio", values_to="Equity")
+
+ggplot(eq_all, aes(Date, Equity, color=Portfolio)) +
+  geom_line(linewidth=.6) + theme_minimal(base_size=13) +
+  labs(title="2025: Strategy vs Buy&Hold", y="Equity", x="", color="")
+```
+
+Here, I wanted to observe the behavior of the out-of-sample strategy. The strategy captures certain movements well, but it is very sensitive to market reversals.
+
+I then wanted to compare my active strategy to simple benchmarks. This allows us to verify whether RSI timing really adds value compared to a passive approach. I will now show that, in the long term, the strategy can significantly outperform, but that it is also exposed to extreme risk in cryptocurrencies.
+
+```{r}
+syms_all <- intersect(names(data), names(data_2025))          # I keep only symbols that exist in both datasets.
+
+data_full <- setNames(lapply(syms_all, \(s)            # Then I rebuild one clean time series per symbol (old + 2025).
+  bind_rows(data[[s]], data_2025[[s]]) |>
+    mutate(Date=as.Date(Date)) |>                  # force Date into Date format so merges/sorts behave correctly.
+    distinct(Date, .keep_all=TRUE) |>
+    arrange(Date)                                                  # sort by Date to get a proper chronological series.
+), syms_all)
+
+w <- setNames(alloc_table$allocation_pct/100, alloc_table$symbol)    # I reuse the weights coming from the 2018–2024 allocation table.
+data_bt <- data_full[names(data_full) %in% names(w)]               # keep only assets that have a weight defined.   
+w <- w[names(data_bt)] ; w <- w/sum(w)                  # Then I align weights to the filtered assets and re-normalize.
+syms <- names(data_bt)                                          # store the final symbol list used for the backtest.
+
+dates <- sort(Reduce(intersect, lapply(data_bt, \(d) as.Date(d$Date))))    # I compute the common date range to align every asset.
+P <- S <- matrix(NA_real_, length(dates), length(syms))     # pre-allocate price and RSI matrices for the full 2018–2025 period.
+for(j in seq_along(syms)){                              # Then I fill the matrices column by column.
+  d <- data_bt[[j]]                                               # grab the dataset for the j-th symbol.
+  m <- match(dates, as.Date(d$Date))             # I map each common date to the asset’s own date index.
+  P[,j] <- d$Adj.Close[m]                               # store aligned adjusted close prices.
+  S[,j] <- d$RSI_14[m]                                             # I store aligned RSI values used by the strategy.
+}
+
+strat_full <- bt(tranche_2025)                     # run the strategy on the full sample using the chosen tranche size.
+
+u_w  <- (INIT*w)/P[1,]                # I create a weighted buy-and-hold by converting initial dollars into units at t0.
+eq_w  <- as.numeric(P %*% u_w)                          # Then I value that fixed-units portfolio through time.
+u_eq <- (INIT/length(syms))/P[1,]                         # do the same for an equal-weight buy-and-hold benchmark.
+eq_eq <- as.numeric(P %*% u_eq)                                        # Then I compute its equity curve.
+
+eq_all <- data.frame(Date=dates, Strategy=strat_full$eq$Equity, BH_weighted=eq_w, BH_equal=eq_eq) |>
+  pivot_longer(-Date, names_to="Portfolio", values_to="Equity") # reshape the data so ggplot can draw all series cleanly.
+
+ggplot(eq_all, aes(Date, Equity, color=Portfolio)) +        # Finally, I plot the strategy against both benchmarks.
+  geom_line(linewidth=.6) + theme_minimal(base_size=13) +
+  labs(title="2018–2025: Strategy vs Benchmarks (weights from 2018–2024)", x="", y="Equity", color="")
+
+```
+
+I then compared my strategy for the period from 2018 to 2025 with various benchmarks.
+
+```{r}
+eq_wide <- data.frame(
+  Date = dates,
+  Strategy = strat_full$eq$Equity,
+  BH_weighted = eq_w,
+  BH_equal = eq_eq
+)
+
+recap <- do.call(rbind, lapply(names(eq_wide)[-1], \(nm){
+  eq <- eq_wide[[nm]]
+  cbind(Portfolio = nm, as.data.frame(t(metrics(eq, dates))))
+}))
+
+rownames(recap) <- NULL
+recap
+```
+
+We can see that we have much higher returns but also much higher risks, according to what max draw down tells us, but it's under control as the calmar indicate.
+
+```{r}
+dsr_strat_full <- dsr(diff(log(strat_full$eq$Equity)), n_trials = 11)
+dsr_bhw_full   <- dsr(diff(log(eq_w)),                  n_trials = 11)
+dsr_bhe_full   <- dsr(diff(log(eq_eq)),                 n_trials = 11)
+
+data.frame(
+  Period    = "2018–2025",
+  Portfolio = c("Strategy", "BH_weighted", "BH_equal"),
+  Deflated_Sharpe = c(dsr_strat_full, dsr_bhw_full, dsr_bhe_full)
+)
+
+```
+
+Over the period 2018–2025, the strategy has the highest Deflated Sharpe Ratio of approximately 0.45, indicating a more credible risk-adjusted performance than the benchmarks. However, the value remains below 0.5, which means that the strategy's advantage exists but remains moderate and statistically weak over the entire period.
+
+I wanted to check whether the strategy remained viable and whether it could be even more accurate and profitable if a tree strategy were added to it. The results are more mixed, suggesting that the strategy is highly dependent on market conditions.
+
+```{r}
+tree_prob <- function(d){
+  if (is.null(d$ret) || length(d$ret) == 0)
+    d$ret <- d$Adj.Close / dplyr::lag(d$Adj.Close) - 1     # I compute daily returns if they are not already available.
+
+  r5 <- zoo::rollapply(d$ret, 5, mean, fill = NA, align = "right")  # I compute a 5-day rolling mean of returns.
+
+  X <- data.frame(r1=d$ret, r5=r5, rsi=d$RSI_14, vol=d$Vol_30)           # I build the feature set for the decision tree.
+  y <- dplyr::lead(d$ret) > 0                                      # I define the target: next-day positive return or not.
+
+  tr <- na.omit(cbind(y, X))                                       # I remove observations with missing values.
+  predict(rpart(y ~ ., tr, method="class"), X, type="prob")[,2]    # I return the probability of a positive return.
+}
+
+S <- matrix(NA_real_, length(dates), length(syms))           # initialize the RSI signal matrix.
+for(j in seq_along(syms)){
+  d <- data_bt[[j]]
+  m <- match(dates, as.Date(d$Date))
+  S[,j] <- d$RSI_14[m]                                  # align RSI values on the common date grid.
+}
+
+p_buy <- 0.55; p_sell <- 0.45                              # I set probability thresholds for ML confirmation.
+for(j in seq_along(syms)){
+  d <- data_bt[[j]]
+  m <- match(dates, as.Date(d$Date))
+  p <- tree_prob(d)[m]                                       # I compute ML-based buy/sell probabilities.
+  S[,j] <- ifelse(S[,j] < LOW  & p <= p_buy,  NA, S[,j])       # cancel BUY signals if ML confidence is too low.
+  S[,j] <- ifelse(S[,j] > HIGH & p >= p_sell, NA, S[,j])           # cancel SELL signals if ML is not bearish enough.
+}
+
+strat_tree_rsi <- bt(tranche_2025)                     # I run the RSI strategy filtered by the decision tree.
+
+```
+
+```{r}
+head(bt(tranche_2025)$stats, 10)
+```
+
+I therefore explored a machine learning approach to complement the simple strategy. The goal is not to trade directly with the tree, but to better understand the conditions favorable to an increase.
+
+```{r}
+fit_tree <- function(d){
+  if (is.null(d$ret) || length(d$ret) == 0)
+    d$ret <- d$Adj.Close / dplyr::lag(d$Adj.Close) - 1
+
+  X <- data.frame(
+    r1  = d$ret,
+    r5  = zoo::rollapply(d$ret, 5, mean, fill=NA, align="right"),
+    rsi = d$RSI_14,
+    vol = d$Vol_30
+  )
+  y <- dplyr::lead(d$ret) > 0
+
+  tr <- na.omit(cbind(y, X))
+  rpart(y ~ ., data=tr, method="class",
+        control=rpart.control(cp=0.01, maxdepth=4),
+        model=TRUE)
+}
+
+ada_sym <- grep("^ADA", syms, value=TRUE)[1]
+tree_ada <- fit_tree(data_bt[[ada_sym]])
+
+rpart.plot(tree_ada, type=4, extra=106, fallen.leaves=TRUE, roundint=FALSE,
+           main=paste("Tree of ADA: Probability of going up tomorrow"))
+
+```
+
+This decision tree shows that the probability of ADA rising the next day depends mainly on recent returns r1 and the RSI. When previous returns are strongly negative r1 \< −5%, the probability of an increase is high at around 63%, suggesting a rebound effect. When the market is more neutral, the RSI plays a role: a high RSI ≥ 63 slightly increases the probability of an increase, while a lower RSI is associated with a lower probability.
+
+```{r}
+recap <- as.data.frame(recap, stringsAsFactors = FALSE)
+
+m_tree <- metrics(strat_tree_rsi$eq$Equity, strat_tree_rsi$eq$Date)
+
+row_tree <- data.frame(
+  Portfolio  = "RSI_Tree",
+  final      = as.numeric(m_tree["final"]),
+  cagr       = as.numeric(m_tree["cagr"]),
+  sharpe     = as.numeric(m_tree["sharpe"]),
+  max_dd     = as.numeric(m_tree["max_dd"]),
+  calmar     = as.numeric(m_tree["calmar"]),
+  trade_cost = as.numeric(strat_tree_rsi$stats["trade_cost"]),
+  stringsAsFactors = FALSE
+)
+
+row_tree[setdiff(names(recap), names(row_tree))] <- NA
+row_tree <- row_tree[, names(recap), drop = FALSE]
+
+recap <- bind_rows(recap, row_tree)
+
+recap
+```
+
+Over the entire period, the RSI_Tree strategy posted the best final performance and the highest CAGR. It also had the highest Sharpe and Calmar ratios, indicating a better risk-adjusted return compared to the other portfolios. However, drawdown remained very high for all strategies, confirming that the crypto universe is extremely risky, even for more sophisticated approaches.
+
+Conclusion :
+
+We compared different strategies, using RSI, whether passive or active, on a set of cryptocurrencies that make up a portfolio. We noticed better performance from active strategies using RSI and volatility. This can be seen with the RSI_tree strategy. There is a very high level of risk, but we accept this risk knowing which market we are operating in. We were able to question the assumption of normality by studying returns and exposing the presence of asymmetry and fat tails. We then coupled the study of our results with a deflated Sharpe ratio because the Sharpe ratio was not sufficient here since we were testing strategies. With the DSRs obtained, we note that the statistical robustness of the various strategies is moderate. Finally, this project shows evidence of a trade-off between return and risk. We noticed that decisions based on systematic rules yield more consistent results than purely arbitrary choices. We also observed that diversification reduces risk, even if it remains limited in the cryptocurrency sector. Finally, backtesting shows that a structured process is generally more reliable than intuition alone, especially in a highly volatile environment.
