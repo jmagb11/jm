@@ -1,2 +1,1 @@
-# jm
-Systematic crypto trading strategies backtesting using volatility-based signals and technical indicators, with multi-asset data processing and risk-performance analysis.
+Backtesting project of systematic trading strategies on cryptocurrencies using volatility-based signals and RSI indicators. Includes multi-asset data cleaning, feature engineering, and performance evaluation. Explores rule-based and machine learning approaches to assess risk, diversification, and robustness of trading strategies.
